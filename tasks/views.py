@@ -1,161 +1,100 @@
+from rest_framework.decorators import api_view
+from rest_framework.response import Response
+from datetime import date, datetime
 
-from django.http import JsonResponse
-from django.views.decorators.csrf import csrf_exempt
-import json
-
-from .models import Task
-from .scoring import calculate_task_score, detect_cycles, DEFAULT_WEIGHTS
-
-
-def build_weights_from_request(request):
-    """
-    Allow simple tuning via query params, e.g.
-      /api/tasks/analyze/?importance_weight=6&quick_win_bonus=15
-    If not provided, defaults are used.
-    """
-    weights = DEFAULT_WEIGHTS.copy()
-    params = request.GET
-
-    for key in [
-        "importance_weight",
-        "quick_win_bonus",
-        "high_effort_penalty",
-        "dependency_bonus",
-        "overdue_bonus",
-        "due_soon_bonus",
-        "due_week_bonus",
-        "low_urgency_bonus",
-    ]:
-        if key in params:
-            try:
-                weights[key] = int(params[key])
-            except ValueError:
-                pass
-
-    return weights
+# temporary memory cache for the latest analyzed tasks
+latest_analyzed_tasks = []
 
 
-@csrf_exempt
-def analyze_tasks(request):
-    """
-    POST /api/tasks/analyze/
-
-    Accepts a JSON array of tasks, validates and scores each one,
-    saves valid tasks into the database, and returns them sorted by
-    priority_score (highest first).
-    """
-    if request.method != "POST":
-        return JsonResponse({"error": "Only POST allowed"}, status=405)
+def calculate_task_score(task):
+    """Compute a score and reason text for a given task."""
+    today = date.today()
 
     try:
-        data = json.loads(request.body)
-    except json.JSONDecodeError:
-        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+        due_date = datetime.strptime(task.get("due_date"), "%Y-%m-%d").date()
+    except Exception:
+        return 0, "Invalid due date."
 
-    if not isinstance(data, list):
-        return JsonResponse({"error": "Expected a JSON array of tasks"}, status=400)
+    days_left = (due_date - today).days
+    importance = int(task.get("importance", 5))
+    estimated_hours = int(task.get("estimated_hours", 1))
+    dependencies = task.get("dependencies", [])
 
-    # Give each task a temporary ID if it doesn't have one (used for cycle detection)
-    for idx, t in enumerate(data):
-        if "id" not in t:
-            t["id"] = idx + 1
+    score = 0
+    reason = []
 
-    weights = build_weights_from_request(request)
-    cycles = detect_cycles(data)
+    # urgency
+    if days_left < 0:
+        score -= 20
+        reason.append("Past due task (-20).")
+    elif days_left <= 3:
+        score += 60
+        reason.append("Due soon (≤3 days).")
+    elif days_left <= 7:
+        score += 40
+        reason.append("Due this week.")
+    else:
+        score += 20
+        reason.append("Due later.")
 
-    results = []
+    # importance
+    score += importance * 5
+    reason.append(f"Importance adds {importance * 5}.")
 
-    for raw_task in data:
-        task_id = raw_task.get("id")
-        in_cycle = task_id in cycles
+    # effort
+    if estimated_hours <= 2:
+        score += 10
+        reason.append("Quick win bonus.")
+    elif estimated_hours > 8:
+        score -= 10
+        reason.append("Long task penalty.")
 
-        score, reason, is_valid = calculate_task_score(
-            raw_task, weights=weights, in_cycle=in_cycle
-        )
+    # dependencies
+    if dependencies:
+        score -= 10
+        reason.append("Has dependencies (-10).")
 
-        out = {
-            "id": task_id,
-            "title": raw_task.get("title"),
-            "due_date": raw_task.get("due_date"),
-            "importance": raw_task.get("importance"),
-            "estimated_hours": raw_task.get("estimated_hours"),
-            "dependencies": raw_task.get("dependencies") or [],
-            "priority_score": score,
-            "reason": reason,
-            "valid": is_valid,
-        }
-
-        if is_valid:
-            obj, created = Task.objects.update_or_create(
-                title=out["title"],
-                due_date=out["due_date"],
-                defaults={
-                    "importance": out["importance"] or 5,
-                    "estimated_hours": out["estimated_hours"] or 1,
-                    "dependencies": out["dependencies"],
-                    "last_score": score,
-                    "last_reason": reason,
-                },
-            )
-            out["db_id"] = obj.id
-        else:
-            out["db_id"] = None
-
-        results.append(out)
-
-    results.sort(key=lambda t: t["priority_score"], reverse=True)
-    return JsonResponse(results, safe=False)
+    return score, " ".join(reason)
 
 
+@api_view(["POST"])
+def analyze_tasks(request):
+    """Analyze and score given tasks."""
+    global latest_analyzed_tasks
+
+    # clear previous analysis to avoid returning stale results
+    try:
+        latest_analyzed_tasks.clear()
+    except Exception:
+        # if it's not a list for some reason, fallback to fresh list
+        latest_analyzed_tasks = []
+
+    tasks = request.data
+    if not isinstance(tasks, list):
+        return Response({"error": "Expected a list of tasks."}, status=400)
+
+    analyzed = []
+    for task in tasks:
+        score, reason = calculate_task_score(task)
+        task["priority_score"] = score
+        task["reason"] = reason
+        analyzed.append(task)
+
+    # sort by score descending
+    analyzed.sort(key=lambda t: t["priority_score"], reverse=True)
+
+    # store in memory for suggest endpoint
+    latest_analyzed_tasks = analyzed
+
+    return Response(analyzed)
+
+
+@api_view(["GET"])
 def suggest_tasks(request):
-    """
-    GET /api/tasks/suggest/
 
-    Reads tasks from the database, recomputes their scores (to keep
-    urgency up to date), and returns the top 3 tasks with explanations.
-    """
-    weights = build_weights_from_request(request)
+    """Return top 3 tasks from the latest analyzed set."""
+    if not latest_analyzed_tasks:
+        return Response({"error": "No tasks analyzed yet."}, status=400)
 
-    qs = Task.objects.all()
-    raw_tasks = []
-
-    for t in qs:
-        raw_tasks.append(
-            {
-                "id": t.id,
-                "title": t.title,
-                "due_date": t.due_date.isoformat(),
-                "importance": t.importance,
-                "estimated_hours": t.estimated_hours,
-                "dependencies": t.dependencies,
-            }
-        )
-
-    cycles = detect_cycles(raw_tasks)
-
-    scored = []
-    for raw in raw_tasks:
-        in_cycle = raw["id"] in cycles
-        score, reason, is_valid = calculate_task_score(
-            raw, weights=weights, in_cycle=in_cycle
-        )
-        if not is_valid:
-            # Skip invalid stored records (should be rare)
-            continue
-
-        scored.append(
-            {
-                "id": raw["id"],
-                "title": raw["title"],
-                "due_date": raw["due_date"],
-                "importance": raw["importance"],
-                "estimated_hours": raw["estimated_hours"],
-                "dependencies": raw["dependencies"],
-                "priority_score": score,
-                "reason": reason,
-            }
-        )
-
-    scored.sort(key=lambda t: t["priority_score"], reverse=True)
-    top3 = scored[:3]
-    return JsonResponse(top3, safe=False)
+    top_tasks = latest_analyzed_tasks[:3]
+    return Response(top_tasks)

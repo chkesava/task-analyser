@@ -1,278 +1,199 @@
-// Backend API URLs
-const ANALYZE_URL = "http://127.0.0.1:8000/api/tasks/analyze/";
-const SUGGEST_URL = "http://127.0.0.1:8000/api/tasks/suggest/";
+// script.js
+let tasks = [];
+let analyzedResults = [];
+let currentSortStrategy = 'smart';
 
-// DOM elements
-const addTaskBtn = document.getElementById("addTaskBtn");
-const analyzeBtn = document.getElementById("analyzeBtn");
-const suggestBtn = document.getElementById("suggestBtn");
-const strategySelect = document.getElementById("strategySelect");
-const statusBar = document.getElementById("statusBar");
-const resultsContainer = document.getElementById("resultsContainer");
-const resultsSummary = document.getElementById("resultsSummary");
-const taskList = document.getElementById("taskList");
+const API_BASE = 'http://127.0.0.1:8000/api';
 
-// Store tasks added from the form
-var taskArray = [];
-// Store last analyzed/suggested result from backend
-var analyzedResults = [];
+document.addEventListener('DOMContentLoaded', function() {
+    initEventListeners();
+    updateTaskList();
+    updateResults();
+});
 
-// Helper: show status message at the bottom of left panel
-function setStatus(message, type) {
-  statusBar.textContent = message || "";
-  statusBar.className = "status-bar";
-
-  if (type === "error") {
-    statusBar.classList.add("status-error");
-  } else if (type === "success") {
-    statusBar.classList.add("status-success");
-  }
-}
-
-// Render list of tasks user has added (left panel)
-function renderTaskList() {
-  taskList.innerHTML = "";
-
-  if (taskArray.length === 0) {
-    taskList.innerHTML =
-      "<p style='color:#6b7280;font-size:12px;'>No tasks added yet.</p>";
-    return;
-  }
-
-  for (var i = 0; i < taskArray.length; i++) {
-    var task = taskArray[i];
-    var div = document.createElement("div");
-    div.className = "task-list-item";
-
-    var text = document.createElement("span");
-    text.textContent = task.title + " — Due: " + task.due_date;
-
-    var btn = document.createElement("button");
-    btn.textContent = "Remove";
-    btn.setAttribute("data-index", i);
-    btn.addEventListener("click", function (e) {
-      var index = parseInt(e.target.getAttribute("data-index"));
-      removeTask(index);
+function initEventListeners() {
+    document.getElementById('addTaskBtn').addEventListener('click', addTask);
+    document.getElementById('analyzeBtn').addEventListener('click', analyzeTasks);
+    document.getElementById('suggestBtn').addEventListener('click', getSuggestions);
+    document.getElementById('sortStrategy').addEventListener('change', function() {
+        currentSortStrategy = this.value;
+        updateResults();
     });
-
-    div.appendChild(text);
-    div.appendChild(btn);
-    taskList.appendChild(div);
-  }
 }
 
-// Remove one task from the list
-function removeTask(index) {
-  taskArray.splice(index, 1);
-  renderTaskList();
-}
+function addTask() {
+    const title = document.getElementById('taskTitle').value.trim();
+    const dueDate = document.getElementById('dueDate').value;
+    const importance = parseInt(document.getElementById('importance').value);
+    const estimatedHours = parseInt(document.getElementById('estimatedHours').value);
+    const dependenciesInput = document.getElementById('dependencies').value.trim();
 
-// Add task from form to taskArray
-addTaskBtn.addEventListener("click", function () {
-  var title = document.getElementById("title").value.trim();
-  var due_date = document.getElementById("due_date").value;
-  var importance = parseInt(document.getElementById("importance").value, 10);
-  var estimated_hours = parseFloat(
-    document.getElementById("estimated_hours").value
-  );
-  var dependenciesRaw = document.getElementById("dependencies").value.trim();
-
-  if (!title || !due_date || isNaN(importance) || isNaN(estimated_hours)) {
-    setStatus("Please fill all required fields (title, due date, importance, hours).", "error");
-    return;
-  }
-
-  var dependencies = [];
-  if (dependenciesRaw) {
-    var parts = dependenciesRaw.split(",");
-    for (var i = 0; i < parts.length; i++) {
-      var d = parts[i].trim();
-      if (d) {
-        dependencies.push(d);
-      }
+    if (!title || !dueDate || !importance || !estimatedHours) {
+        showStatus('Please fill all required fields.', 'error');
+        return;
     }
-  }
 
-  var task = {
-    title: title,
-    due_date: due_date,
-    importance: importance,
-    estimated_hours: estimated_hours,
-    dependencies: dependencies
-  };
+    const dependencies = dependenciesInput 
+        ? dependenciesInput.split(',').map(d => d.trim()).filter(d => d)
+        : [];
 
-  taskArray.push(task);
-  renderTaskList();
-  setStatus("Task added.", "success");
+    const task = {
+        title,
+        due_date: dueDate,
+        importance,
+        estimated_hours: estimatedHours,
+        dependencies
+    };
 
-  // reset only some fields
-  document.getElementById("title").value = "";
-  document.getElementById("dependencies").value = "";
-});
+    tasks.push(task);
+    updateTaskList();
+    clearInputs();
+    showStatus('Task added.', 'success');
+}
 
-// Call backend /tasks/analyze/ with current taskArray
-analyzeBtn.addEventListener("click", function () {
-  if (taskArray.length === 0) {
-    setStatus("Add at least one task before analyzing.", "error");
-    return;
-  }
+function analyzeTasks() {
+    if (tasks.length === 0) {
+        showStatus('Please add some tasks first.', 'error');
+        return;
+    }
 
-  setStatus("Analyzing tasks...");
+    showStatus('Analyzing tasks...', 'success');
 
-  fetch(ANALYZE_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(taskArray)
-  })
-    .then(function (res) {
-      if (!res.ok) {
-        throw new Error("Server returned " + res.status);
-      }
-      return res.json();
+    fetch(`${API_BASE}/tasks/analyze/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tasks)
     })
-    .then(function (data) {
-      analyzedResults = data;
-      renderResults();
-      setStatus("Analysis complete.", "success");
+    .then(response => response.json())
+    .then(data => {
+        analyzedResults = data;
+        updateResults();
+        showStatus('Analysis complete.', 'success');
     })
-    .catch(function (error) {
-      console.error(error);
-      setStatus("Failed to analyze tasks. Check server and CORS settings.", "error");
+    .catch(error => {
+        showStatus('Analysis failed. Check if backend is running.', 'error');
+        console.error('Analysis error:', error);
     });
-});
+}
 
-// Call backend /tasks/suggest/
-suggestBtn.addEventListener("click", function () {
-  setStatus("Fetching suggested tasks...");
+function getSuggestions() {
+    showStatus('Fetching suggestions...', 'success');
 
-  fetch(SUGGEST_URL)
-    .then(function (res) {
-      if (!res.ok) {
-        throw new Error("Server returned " + res.status);
-      }
-      return res.json();
+    fetch(`${API_BASE}/tasks/suggest/`)
+    .then(response => response.json())
+    .then(data => {
+        if (data.error) {
+            showStatus(data.error, 'error');
+            return;
+        }
+        analyzedResults = data;
+        updateResults();
+        showStatus('Suggestions loaded.', 'success');
     })
-    .then(function (data) {
-      analyzedResults = data;
-      renderResults();
-      setStatus("Loaded suggested tasks.", "success");
-    })
-    .catch(function (error) {
-      console.error(error);
-      setStatus("Failed to fetch suggestions.", "error");
+    .catch(error => {
+        showStatus('Failed to fetch suggestions.', 'error');
+        console.error('Suggestions error:', error);
     });
-});
+}
 
-// Re-render results when strategy is changed
-strategySelect.addEventListener("change", function () {
-  if (analyzedResults.length > 0) {
-    renderResults();
-  }
-});
+function updateTaskList() {
+    const taskCount = document.getElementById('taskCount');
+    const tasksList = document.getElementById('tasksList');
+    
+    taskCount.textContent = tasks.length;
+    
+    if (tasks.length === 0) {
+        tasksList.innerHTML = '<div style="color: #9ca3af; padding: 20px;">No tasks added yet.</div>';
+        return;
+    }
 
-// Decide priority level based on score
+    tasksList.innerHTML = tasks.map((task, index) => `
+        <div class="task-item">
+            <span>${task.title} — Due: ${task.due_date}</span>
+            <button class="remove-btn" onclick="removeTask(${index})">Remove</button>
+        </div>
+    `).join('');
+}
+
+function removeTask(index) {
+    tasks.splice(index, 1);
+    updateTaskList();
+    showStatus('Task removed.', 'success');
+}
+
+function updateResults() {
+    const summary = document.getElementById('resultsSummary');
+    const content = document.getElementById('resultsContent');
+    const strategyNames = {
+        smart: 'Smart Balance',
+        fastest: 'Fastest Wins',
+        impact: 'High Impact',
+        deadline: 'Deadline Driven'
+    };
+
+    if (analyzedResults.length === 0) {
+        summary.innerHTML = '';
+        content.innerHTML = '<div class="empty-state">No tasks analyzed yet. Add tasks or fetch suggestions to see results.</div>';
+        return;
+    }
+
+    // Sort results based on strategy
+    let sortedResults = [...analyzedResults];
+    switch(currentSortStrategy) {
+        case 'fastest':
+            sortedResults.sort((a, b) => a.estimated_hours - b.estimated_hours);
+            break;
+        case 'impact':
+            sortedResults.sort((a, b) => b.importance - a.importance);
+            break;
+        case 'deadline':
+            sortedResults.sort((a, b) => new Date(a.due_date) - new Date(b.due_date));
+            break;
+        default:
+            sortedResults.sort((a, b) => b.priority_score - a.priority_score);
+    }
+
+    summary.innerHTML = `${sortedResults.length} tasks · Strategy: ${strategyNames[currentSortStrategy]}`;
+
+    content.innerHTML = sortedResults.map(task => {
+        const priority = getPriorityLevel(task.priority_score);
+        return `
+            <div class="priority-card ${priority}">
+                <h4>${task.title}</h4>
+                <span class="priority-pill pill-${priority}">${priority.toUpperCase()}</span>
+                <div class="score">Score: ${task.priority_score}</div>
+                <div class="metadata">
+                    <span>Due: ${task.due_date}</span>
+                    <span>Importance: ${task.importance}</span>
+                    <span>${task.estimated_hours}h</span>
+                </div>
+                <div class="reason">${task.reason}</div>
+            </div>
+        `;
+    }).join('');
+}
+
 function getPriorityLevel(score) {
-  if (score >= 120) {
-    return "high";
-  } else if (score >= 80) {
-    return "medium";
-  } else {
-    return "low";
-  }
+    if (score >= 90) return 'high';
+    if (score >= 60) return 'medium';
+    return 'low';
 }
 
-// Sort tasks based on dropdown strategy
-function sortTasksByStrategy(tasks, strategy) {
-  var arr = tasks.slice(); // copy
-
-  if (strategy === "fastest") {
-    arr.sort(function (a, b) {
-      return (a.estimated_hours || 0) - (b.estimated_hours || 0);
-    });
-  } else if (strategy === "impact") {
-    arr.sort(function (a, b) {
-      return (b.importance || 0) - (a.importance || 0);
-    });
-  } else if (strategy === "deadline") {
-    arr.sort(function (a, b) {
-      var da = new Date(a.due_date);
-      var db = new Date(b.due_date);
-      return da - db;
-    });
-  } else {
-    // smart balance - use backend score
-    arr.sort(function (a, b) {
-      return (b.priority_score || 0) - (a.priority_score || 0);
-    });
-  }
-
-  return arr;
+function clearInputs() {
+    document.getElementById('taskTitle').value = '';
+    document.getElementById('dueDate').value = '';
+    document.getElementById('importance').value = 5;
+    document.getElementById('estimatedHours').value = 1;
+    document.getElementById('dependencies').value = '';
 }
 
-// Render results on the right side
-function renderResults() {
-  resultsContainer.innerHTML = "";
-
-  if (!analyzedResults || analyzedResults.length === 0) {
-    resultsContainer.innerHTML =
-      "<div class='empty-state'><h3>No results yet</h3><p>Analyze tasks or get suggestions.</p></div>";
-    resultsSummary.textContent = "";
-    return;
-  }
-
-  var strategy = strategySelect.value;
-  var tasks = sortTasksByStrategy(analyzedResults, strategy);
-
-  resultsSummary.textContent =
-    tasks.length + " task(s) · Strategy: " + strategy;
-
-  for (var i = 0; i < tasks.length; i++) {
-    var t = tasks[i];
-    var score = t.priority_score || 0;
-    var level = getPriorityLevel(score);
-
-    var card = document.createElement("div");
-    card.className = "task-card " + level;
-
-    var headerDiv = document.createElement("div");
-    headerDiv.className = "task-header";
-
-    var titleEl = document.createElement("h3");
-    titleEl.className = "task-title";
-    titleEl.textContent = t.title || "(No title)";
-
-    var pill = document.createElement("span");
-    pill.className = "priority-pill " + level;
-    pill.textContent = level.toUpperCase();
-
-    headerDiv.appendChild(titleEl);
-    headerDiv.appendChild(pill);
-
-    var scoreDiv = document.createElement("div");
-    scoreDiv.className = "task-score";
-    scoreDiv.textContent = "Score: " + score;
-
-    var metaDiv = document.createElement("div");
-    metaDiv.className = "task-meta";
-    metaDiv.innerHTML =
-      "<span><strong>Due:</strong> " + (t.due_date || "N/A") + "</span>" +
-      "<span><strong>Importance:</strong> " + (t.importance || "N/A") + "</span>" +
-      "<span><strong>Effort:</strong> " + (t.estimated_hours || "N/A") + "h</span>";
-
-    var reasonDiv = document.createElement("div");
-    reasonDiv.className = "task-reason";
-    reasonDiv.textContent = t.reason || "";
-
-    card.appendChild(headerDiv);
-    card.appendChild(scoreDiv);
-    card.appendChild(metaDiv);
-    card.appendChild(reasonDiv);
-
-    resultsContainer.appendChild(card);
-  }
+function showStatus(message, type) {
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = message;
+    statusEl.className = `status ${type}`;
+    
+    setTimeout(() => {
+        statusEl.textContent = '';
+        statusEl.className = 'status';
+    }, 5000);
 }
-
-// Initial left list render
-renderTaskList();
