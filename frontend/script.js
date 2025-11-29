@@ -1,6 +1,6 @@
 // Backend API URLs
-const ANALYZE_URL = "http://127.0.0.1:8000/tasks/analyze/";
-const SUGGEST_URL = "http://127.0.0.1:8000/tasks/suggest/";
+const ANALYZE_URL = "http://127.0.0.1:8000/api/tasks/analyze/";
+const SUGGEST_URL = "http://127.0.0.1:8000/api/tasks/suggest/";
 
 // DOM elements
 const addTaskBtn = document.getElementById("addTaskBtn");
